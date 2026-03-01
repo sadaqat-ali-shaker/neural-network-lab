@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Neural Network Propagation Lab — © Sadaqat Ali</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; color: #e0e0e8; font-family: 'IBM Plex Mono', monospace; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useCallback, useMemo } = React;
+
+const sigmoid = (x) => 1 / (1 + Math.exp(-Math.min(Math.max(x, -500), 500)));
+const sigmoidDeriv = (s) => s * (1 - s);
+const relu = (x) => Math.max(0, x);
+const reluDeriv = (x) => (x > 0 ? 1 : 0);
+
+function seededRandom(seed) {
+  let s = seed;
+  return () => { s = (s * 16807 + 0) % 2147483647; return (s - 1) / 2147483646; };
+}
+function initWeights(rows, cols, rng) {
+  const w = [];
+  for (let i = 0; i < rows; i++) { w[i] = []; for (let j = 0; j < cols; j++) w[i][j] = parseFloat((rng() * 2 - 1).toFixed(4)); }
+  return w;
+}
+function initBiases(size, rng) { return Array.from({ length: size }, () => parseFloat((rng() * 0.5).toFixed(4))); }
+function matVecMul(mat, vec) { return mat.map((row) => row.reduce((s, w, j) => s + w * (vec[j] || 0), 0)); }
+function outerProduct(a, b) { return a.map((ai) => b.map((bj) => parseFloat((ai * bj).toFixed(6)))); }
+function transpose(mat) { if (!mat.length) return []; return mat[0].map((_, j) => mat.map((row) => row[j])); }
+function matVecMulT(mat, vec) { return matVecMul(transpose(mat), vec); }
+
+function App() {
+  const [layerConfig, setLayerConfig] = useState("3,4,4,2");
+  const [inputValues, setInputValues] = useState("0.5,0.8,0.3");
+  const [targetValues, setTargetValues] = useState("1,0");
+  const [activationFn, setActivationFn] = useState("sigmoid");
+  const [learningRate, setLearningRate] = useState(0.1);
+  const [result, setResult] = useState(null);
+  const [activeTab, setActiveTab] = useState("forward");
+  const [seed, setSeed] = useState(42);
+  const [lockWeights, setLockWeights] = useState(true);
+
+  const layers = useMemo(() => layerConfig.split(",").map((s) => parseInt(s.trim())).filter((n) => !isNaN(n) && n > 0), [layerConfig]);
+  const totalParams = useMemo(() => {
+    let tw = 0, tb = 0;
+    for (let i = 0; i < layers.length - 1; i++) { tw += layers[i] * layers[i + 1]; tb += layers[i + 1]; }
+    return { total: tw + tb, totalWeights: tw, totalBiases: tb };
+  }, [layers]);
+
+  const activate = activationFn === "sigmoid" ? sigmoid : relu;
+
+  const runPropagation = useCallback(() => {
+    const inputs = inputValues.split(",").map((s) => parseFloat(s.trim())).filter((n) => !isNaN(n));
+    const targets = targetValues.split(",").map((s) => parseFloat(s.trim())).filter((n) => !isNaN(n));
+    if (layers.length < 2 || inputs.length !== layers[0] || targets.length !== layers[layers.length - 1]) return;
+
+    const currentSeed = lockWeights ? seed : Math.floor(Math.random() * 100000);
+    if (!lockWeights) setSeed(currentSeed);
+    const rng = seededRandom(currentSeed);
+
+    const weights = [], biases = [];
+    for (let l = 0; l < layers.length - 1; l++) { weights.push(initWeights(layers[l + 1], layers[l], rng)); biases.push(initBiases(layers[l + 1], rng)); }
+
+    const activations = [inputs], zValues = [null];
+    for (let l = 0; l < weights.length; l++) {
+      const z = matVecMul(weights[l], activations[l]).map((v, i) => v + biases[l][i]);
+      zValues.push(z); activations.push(z.map(activate).map((v) => parseFloat(v.toFixed(6))));
+    }
+    const output = activations[activations.length - 1];
+    const loss = targets.reduce((s, t, i) => s + 0.5 * (t - output[i]) ** 2, 0);
+
+    const deltas = new Array(layers.length).fill(null);
+    const outL = activations.length - 1;
+    if (activationFn === "sigmoid") deltas[outL] = output.map((a, i) => (a - targets[i]) * sigmoidDeriv(a));
+    else deltas[outL] = output.map((a, i) => (a - targets[i]) * reluDeriv(zValues[outL][i]));
+    for (let l = outL - 1; l >= 1; l--) {
+      const wTd = matVecMulT(weights[l], deltas[l + 1]);
+      if (activationFn === "sigmoid") deltas[l] = wTd.map((v, i) => v * sigmoidDeriv(activations[l][i]));
+      else deltas[l] = wTd.map((v, i) => v * reluDeriv(zValues[l][i]));
+    }
+
+    const weightGradients = [], biasGradients = [], updatedWeights = [], updatedBiases = [];
+    for (let l = 0; l < weights.length; l++) {
+      const dW = outerProduct(deltas[l + 1], activations[l]);
+      const dB = deltas[l + 1].map((d) => parseFloat(d.toFixed(6)));
+      weightGradients.push(dW); biasGradients.push(dB);
+      updatedWeights.push(weights[l].map((row, i) => row.map((w, j) => parseFloat((w - learningRate * dW[i][j]).toFixed(6)))));
+      updatedBiases.push(biases[l].map((b, i) => parseFloat((b - learningRate * dB[i]).toFixed(6))));
+    }
+    setResult({ weights, biases, activations, zValues, deltas, weightGradients, biasGradients, updatedWeights, updatedBiases, output, loss: parseFloat(loss.toFixed(6)), targets, seed: currentSeed });
+  }, [layers, inputValues, targetValues, activationFn, learningRate, activate, seed, lockWeights]);
+
+  const fmt = (v) => (typeof v === "number" ? v.toFixed(4) : v);
+  const S = {
+    input: { width: "100%", background: "#0a0a0f", border: "1px solid #334155", borderRadius: 8, padding: "10px 14px", color: "#e0e0e8", fontSize: 14, fontFamily: "inherit", outline: "none", boxSizing: "border-box" },
+    label: { fontSize: 11, textTransform: "uppercase", letterSpacing: 1.5, color: "#64748b", display: "block", marginBottom: 6 },
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#0a0a0f", color: "#e0e0e8", fontFamily: "'IBM Plex Mono', monospace" }}>
+      <div style={{ background: "linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%)", borderBottom: "1px solid #334155", padding: "24px 32px" }}>
+        <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+          <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 26, fontWeight: 700, margin: 0, background: "linear-gradient(90deg, #60a5fa, #a78bfa, #f472b6)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>⚡ Neural Network Propagation Lab</h1>
+          <p style={{ color: "#64748b", margin: "4px 0 0", fontSize: 12 }}>Forward & Backward Propagation Calculator</p>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 1100, margin: "0 auto", padding: "24px 32px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 24 }}>
+          <div style={{ background: "#111827", border: "1px solid #1e293b", borderRadius: 12, padding: 20 }}>
+            <label style={S.label}>Network Architecture (neurons per layer)</label>
+            <input value={layerConfig} onChange={(e) => setLayerConfig(e.target.value)} style={S.input} placeholder="e.g. 3,4,4,2" />
+            <div style={{ fontSize: 11, color: "#475569", marginTop: 4 }}>
+              {layers.length >= 2 ? `${layers.length} layers: Input(${layers[0]}) → ${layers.slice(1, -1).map((n, i) => `Hidden${i + 1}(${n})`).join(" → ")}${layers.length > 2 ? " → " : ""}Output(${layers[layers.length - 1]})` : "Need at least 2 layers"}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 16 }}>
+              <div>
+                <label style={S.label}>Input Values</label>
+                <input value={inputValues} onChange={(e) => setInputValues(e.target.value)} style={S.input} />
+                <div style={{ fontSize: 10, color: "#475569", marginTop: 2 }}>Count must match input layer ({layers[0] || "?"})</div>
+              </div>
+              <div>
+                <label style={S.label}>Target Values</label>
+                <input value={targetValues} onChange={(e) => setTargetValues(e.target.value)} style={S.input} />
+                <div style={{ fontSize: 10, color: "#475569", marginTop: 2 }}>Count must match output layer ({layers[layers.length - 1] || "?"})</div>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ background: "#111827", border: "1px solid #1e293b", borderRadius: 12, padding: 20 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <label style={S.label}>Activation Function</label>
+                <select value={activationFn} onChange={(e) => setActivationFn(e.target.value)} style={{ ...S.input, cursor: "pointer" }}>
+                  <option value="sigmoid">Sigmoid σ(x)</option>
+                  <option value="relu">ReLU max(0,x)</option>
+                </select>
+              </div>
+              <div>
+                <label style={S.label}>Learning Rate (α)</label>
+                <input type="number" step="0.01" value={learningRate} onChange={(e) => setLearningRate(parseFloat(e.target.value) || 0.01)} style={S.input} />
+              </div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14 }}>
+              <button onClick={() => setLockWeights(!lockWeights)} style={{ display: "flex", alignItems: "center", gap: 6, background: lockWeights ? "#172554" : "#1c1917", border: `1px solid ${lockWeights ? "#3b82f6" : "#334155"}`, borderRadius: 8, padding: "8px 14px", color: lockWeights ? "#60a5fa" : "#64748b", fontSize: 12, fontFamily: "inherit", cursor: "pointer", fontWeight: 600 }}>
+                {lockWeights ? "🔒 Weights Locked" : "🔓 Weights Random"}
+              </button>
+              {lockWeights && (
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <label style={{ fontSize: 11, color: "#64748b" }}>Seed:</label>
+                  <input type="number" value={seed} onChange={(e) => setSeed(parseInt(e.target.value) || 1)} style={{ ...S.input, width: 80, padding: "6px 10px", fontSize: 12 }} />
+                </div>
+              )}
+              <div style={{ fontSize: 10, color: "#475569", flex: 1 }}>{lockWeights ? "Same seed = same weights every run" : "New random weights each run"}</div>
+            </div>
+            <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+              <div style={{ background: "#0a0a0f", borderRadius: 8, padding: "12px 14px", textAlign: "center" }}>
+                <div style={{ fontSize: 22, fontWeight: 700, color: "#60a5fa" }}>{totalParams.total}</div>
+                <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: 1 }}>Total Params</div>
+                <div style={{ fontSize: 9, color: "#475569", marginTop: 2 }}>{totalParams.totalWeights}W + {totalParams.totalBiases}B</div>
+              </div>
+              <div style={{ background: "#0a0a0f", borderRadius: 8, padding: "12px 14px", textAlign: "center" }}>
+                <div style={{ fontSize: 22, fontWeight: 700, color: "#a78bfa" }}>{layers.length - 1}</div>
+                <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: 1 }}>Trainable Layers</div>
+              </div>
+              <div style={{ background: "#0a0a0f", borderRadius: 8, padding: "12px 14px", textAlign: "center" }}>
+                <div style={{ fontSize: 22, fontWeight: 700, color: "#f472b6" }}>{result ? result.loss : "—"}</div>
+                <div style={{ fontSize: 10, color: "#64748b", textTransform: "uppercase", letterSpacing: 1 }}>Loss (MSE)</div>
+              </div>
+            </div>
+            <button onClick={runPropagation} style={{ width: "100%", marginTop: 16, padding: "12px", background: "linear-gradient(135deg, #3b82f6, #8b5cf6)", color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, fontFamily: "'Space Grotesk', sans-serif", cursor: "pointer" }}>▶ Run Propagation</button>
+          </div>
+        </div>
+
+        {/* Parameter Breakdown */}
+        <div style={{ background: "#111827", border: "1px solid #1e293b", borderRadius: 12, padding: 20, marginBottom: 24 }}>
+          <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 600, color: "#94a3b8", margin: "0 0 12px", textTransform: "uppercase", letterSpacing: 1 }}>Parameter Breakdown</h3>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            {layers.map((n, l) => {
+              if (l === 0) return (<div key={l} style={{ background: "#0a0a0f", borderRadius: 8, padding: "12px 16px", flex: "1 1 140px", border: "1px solid #1e293b" }}><div style={{ fontSize: 12, color: "#60a5fa", fontWeight: 600, marginBottom: 4 }}>Input Layer</div><div style={{ fontSize: 11, color: "#94a3b8" }}>{n} neurons</div><div style={{ fontSize: 10, color: "#475569", marginTop: 4 }}>No weights, no biases</div></div>);
+              const prev = layers[l - 1]; const w = prev * n; const b = n;
+              return (<div key={l} style={{ background: "#0a0a0f", borderRadius: 8, padding: "12px 16px", flex: "1 1 160px", border: "1px solid #1e293b" }}><div style={{ fontSize: 12, color: l === layers.length - 1 ? "#f472b6" : "#a78bfa", fontWeight: 600, marginBottom: 4 }}>{l === layers.length - 1 ? "Output" : `Hidden ${l}`}</div><div style={{ fontSize: 11, color: "#94a3b8" }}>Weights: {prev}×{n} = <span style={{ color: "#a78bfa", fontWeight: 600 }}>{w}</span></div><div style={{ fontSize: 11, color: "#94a3b8" }}>Biases: <span style={{ color: "#34d399", fontWeight: 600 }}>{b}</span></div><div style={{ fontSize: 11, color: "#e0e0e8", fontWeight: 600, marginTop: 4, paddingTop: 4, borderTop: "1px solid #1e293b" }}>= <span style={{ color: "#fbbf24" }}>{w + b}</span> params</div></div>);
+            })}
+            <div style={{ background: "linear-gradient(135deg, #1e1b4b, #172554)", borderRadius: 8, padding: "12px 16px", flex: "1 1 100px", display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", border: "1px solid #3b82f6" }}>
+              <div style={{ fontSize: 24, fontWeight: 700, color: "#60a5fa" }}>{totalParams.total}</div>
+              <div style={{ fontSize: 10, color: "#94a3b8", textTransform: "uppercase" }}>Total</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Results */}
+        {result && (
+          <div style={{ background: "#111827", border: "1px solid #1e293b", borderRadius: 12, overflow: "hidden" }}>
+            <div style={{ display: "flex", borderBottom: "1px solid #1e293b" }}>
+              {[{ id: "forward", label: "⏩ Forward Pass", color: "#34d399" }, { id: "backward", label: "⏪ Backward Pass", color: "#f472b6" }, { id: "gradients", label: "∇ Gradients", color: "#fbbf24" }, { id: "updated", label: "✅ Updated", color: "#60a5fa" }].map((tab) => (
+                <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{ flex: 1, padding: "14px 16px", background: activeTab === tab.id ? "#1e293b" : "transparent", color: activeTab === tab.id ? tab.color : "#64748b", border: "none", borderBottom: activeTab === tab.id ? `2px solid ${tab.color}` : "2px solid transparent", fontSize: 12, fontWeight: 600, fontFamily: "'Space Grotesk', sans-serif", cursor: "pointer", transition: "all 0.2s" }}>{tab.label}</button>
+              ))}
+            </div>
+            <div style={{ padding: 20, maxHeight: 520, overflowY: "auto" }}>
+              {activeTab === "forward" && (<div>
+                {result.activations.map((a, l) => (<div key={l} style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: l === 0 ? "#60a5fa" : l === result.activations.length - 1 ? "#f472b6" : "#a78bfa", marginBottom: 6 }}>{l === 0 ? "Input Layer" : l === result.activations.length - 1 ? "Output Layer" : `Hidden Layer ${l}`} — a({l + 1})</div>
+                  {l > 0 && result.zValues[l] && (<div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>z({l + 1}) = [{result.zValues[l].map((z) => fmt(z)).join(", ")}]</div>)}
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{a.map((val, i) => (<span key={i} style={{ background: "#0a0a0f", padding: "6px 10px", borderRadius: 6, fontSize: 12, color: "#e0e0e8", border: "1px solid #1e293b" }}>{fmt(val)}</span>))}</div>
+                  {l < result.weights.length && (<div style={{ marginTop: 8, background: "#0a0a0f", borderRadius: 8, padding: 12, border: "1px solid #1e293b" }}>
+                    <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>W({l + 1}) [{result.weights[l].length}×{result.weights[l][0].length}]</div>
+                    <div style={{ fontFamily: "inherit", fontSize: 11, color: "#94a3b8", lineHeight: 1.8 }}>{result.weights[l].map((row, ri) => (<div key={ri}>[{row.map((w) => fmt(w)).join(", ")}]</div>))}</div>
+                    <div style={{ fontSize: 11, color: "#34d399", marginTop: 6 }}>b({l + 1}) = [{result.biases[l].map((b) => fmt(b)).join(", ")}]</div>
+                  </div>)}
+                </div>))}
+                <div style={{ background: "linear-gradient(135deg, #064e3b, #0a0a0f)", border: "1px solid #34d399", borderRadius: 8, padding: 14, marginTop: 8 }}>
+                  <span style={{ color: "#34d399", fontWeight: 600, fontSize: 13 }}>Prediction: </span>
+                  <span style={{ color: "#e0e0e8", fontSize: 13 }}>[{result.output.map((v) => fmt(v)).join(", ")}]</span>
+                  <span style={{ color: "#64748b", fontSize: 12, marginLeft: 12 }}>Target: [{result.targets.map((v) => fmt(v)).join(", ")}]</span>
+                  <span style={{ color: "#fbbf24", fontSize: 12, marginLeft: 12 }}>Loss: {result.loss}</span>
+                </div>
+              </div>)}
+
+              {activeTab === "backward" && (<div>
+                {result.deltas.map((d, l) => d ? (<div key={l} style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: l === result.deltas.length - 1 ? "#f472b6" : "#a78bfa", marginBottom: 6 }}>δ({l + 1}) — {l === result.deltas.length - 1 ? "Output Layer" : `Hidden Layer ${l}`}</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{d.map((val, i) => (<span key={i} style={{ background: "#0a0a0f", padding: "6px 10px", borderRadius: 6, fontSize: 12, color: val > 0 ? "#fb7185" : val < 0 ? "#34d399" : "#64748b", border: "1px solid #1e293b" }}>{fmt(val)}</span>))}</div>
+                </div>) : null)}
+              </div>)}
+
+              {activeTab === "gradients" && (<div>
+                {result.weightGradients.map((dW, l) => (<div key={l} style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "#fbbf24", marginBottom: 6 }}>∂J/∂W({l + 1})</div>
+                  <div style={{ background: "#0a0a0f", borderRadius: 8, padding: 12, border: "1px solid #1e293b", fontSize: 11, color: "#94a3b8", lineHeight: 1.8 }}>{dW.map((row, ri) => (<div key={ri}>[{row.map((g) => fmt(g)).join(", ")}]</div>))}</div>
+                  <div style={{ fontSize: 11, color: "#34d399", marginTop: 6 }}>∂J/∂b({l + 1}) = [{result.biasGradients[l].map((b) => fmt(b)).join(", ")}]</div>
+                </div>))}
+              </div>)}
+
+              {activeTab === "updated" && (<div>
+                {result.updatedWeights.map((W, l) => (<div key={l} style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "#60a5fa", marginBottom: 6 }}>W({l + 1}) updated</div>
+                  <div style={{ background: "#0a0a0f", borderRadius: 8, padding: 12, border: "1px solid #1e293b", fontSize: 11, color: "#94a3b8", lineHeight: 1.8 }}>{W.map((row, ri) => (<div key={ri}>[{row.map((w) => fmt(w)).join(", ")}]</div>))}</div>
+                  <div style={{ fontSize: 11, color: "#34d399", marginTop: 6 }}>b({l + 1}) = [{result.updatedBiases[l].map((b) => fmt(b)).join(", ")}]</div>
+                </div>))}
+              </div>)}
+            </div>
+          </div>
+        )}
+
+        {/* Network Viz */}
+        {layers.length >= 2 && (
+          <div style={{ background: "#111827", border: "1px solid #1e293b", borderRadius: 12, padding: 20, marginTop: 24 }}>
+            <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 600, color: "#94a3b8", margin: "0 0 16px", textTransform: "uppercase", letterSpacing: 1 }}>Network Topology</h3>
+            <svg viewBox={`0 0 ${Math.max(600, layers.length * 150)} ${Math.max(200, Math.max(...layers) * 50 + 40)}`} style={{ width: "100%", height: "auto" }}>
+              {layers.slice(0, -1).map((_, l) => { const x1 = 80 + l * 140; const x2 = 80 + (l + 1) * 140; const maxH = Math.max(...layers) * 50; return Array.from({ length: layers[l] }).flatMap((__, i) => Array.from({ length: layers[l + 1] }).map((___, j) => { const y1 = (maxH - (layers[l] - 1) * 44) / 2 + i * 44 + 20; const y2 = (maxH - (layers[l + 1] - 1) * 44) / 2 + j * 44 + 20; return <line key={`${l}-${i}-${j}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#1e293b" strokeWidth={0.5} />; })); })}
+              {layers.map((n, l) => { const maxH = Math.max(...layers) * 50; const x = 80 + l * 140; const colors = ["#3b82f6", "#8b5cf6", "#a78bfa", "#f472b6"]; const color = l === 0 ? colors[0] : l === layers.length - 1 ? colors[3] : colors[1 + ((l - 1) % 2)]; return Array.from({ length: n }).map((_, i) => { const y = (maxH - (n - 1) * 44) / 2 + i * 44 + 20; const val = result?.activations?.[l]?.[i]; return (<g key={`n-${l}-${i}`}><circle cx={x} cy={y} r={16} fill="#0a0a0f" stroke={color} strokeWidth={2} />{val !== undefined && (<text x={x} y={y + 4} textAnchor="middle" fill="#e0e0e8" fontSize={8} fontFamily="IBM Plex Mono">{val.toFixed(2)}</text>)}</g>); }); })}
+              {layers.map((_, l) => { const maxH = Math.max(...layers) * 50; const x = 80 + l * 140; return (<text key={`lbl-${l}`} x={x} y={maxH + 30} textAnchor="middle" fill="#64748b" fontSize={10} fontFamily="Space Grotesk">{l === 0 ? "Input" : l === layers.length - 1 ? "Output" : `Hidden ${l}`}</text>); })}
+            </svg>
+          </div>
+        )}
+
+        <div style={{ textAlign: "center", padding: "20px 0 12px", fontSize: 12, color: "#475569" }}>© Sadaqat Ali</div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
